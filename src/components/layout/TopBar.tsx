@@ -30,11 +30,8 @@ export const TopBar: React.FC<Props> = ({ title, onCreateLesson }) => {
         {title}
       </h2>
       {onCreateLesson && (
-        <Button
-          onClick={onCreateLesson}
-          style={{ borderRadius: 20, height: 46 }}
-        >
-          Создать видеокурс
+        <Button onClick={onCreateLesson} style={{ borderRadius: 20, height: 46 }}>
+          Создать курс
         </Button>
       )}
     </header>

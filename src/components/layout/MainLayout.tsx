@@ -2,12 +2,12 @@
 import React, { useState } from "react";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
-import { Outlet, useLocation } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { MentorProfileModal } from "../mentor/MentorProfileModal";
-import { LessonCreationModal } from "../course/LessonCreationModal";
 
 const titleMap: Record<string, string> = {
   "/courses": "Разработка курсов",
+  "/courses/create": "Создание курса",
   "/material": "Материал",
   "/events": "Мероприятия",
   "/staff": "Сотрудники",
@@ -15,11 +15,10 @@ const titleMap: Record<string, string> = {
 
 export const MainLayout: React.FC = () => {
   const [mentorOpen, setMentorOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
 
-  const title =
-    titleMap[location.pathname] || "Окно ментора";
+  const title = titleMap[location.pathname] || "Окно ментора";
 
   return (
     <div
@@ -34,9 +33,7 @@ export const MainLayout: React.FC = () => {
         <TopBar
           title={title}
           onCreateLesson={
-            location.pathname === "/courses"
-              ? () => setCreateOpen(true)
-              : undefined
+            location.pathname === "/courses" ? () => navigate("/courses/create") : undefined
           }
         />
         <main
@@ -51,14 +48,7 @@ export const MainLayout: React.FC = () => {
         </main>
       </div>
 
-      <MentorProfileModal
-        open={mentorOpen}
-        onClose={() => setMentorOpen(false)}
-      />
-      <LessonCreationModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-      />
+      <MentorProfileModal open={mentorOpen} onClose={() => setMentorOpen(false)} />
     </div>
   );
 };

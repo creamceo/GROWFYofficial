@@ -4,6 +4,7 @@ import { colors, radius, shadows } from "../../theme";
 import { Input } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { useNavigate } from "react-router-dom";
+import iconLogo from "../../assets/icon_logo.svg";
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -44,25 +45,27 @@ export const LoginPage: React.FC = () => {
         <div style={{ textAlign: "center", marginBottom: 32 }}>
           <div
             style={{
-              fontSize: 22,
-              fontWeight: 600,
-              letterSpacing: "0.18em",
-              textTransform: "uppercase",
-              color: colors.textMain,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 10,
             }}
           >
-            GROWFY
-          </div>
-          <div
-            style={{
-              marginTop: 6,
-              fontSize: 12,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: colors.textSoft,
-            }}
-          >
-            LEARNING PLATFORM
+            <img
+              src={iconLogo}
+              alt="GROWFY"
+              style={{ width: 26, height: 26 }}
+            />
+            <div
+              style={{
+                fontSize: 22,
+                fontWeight: 600,
+                letterSpacing: "0.18em",
+                textTransform: "uppercase",
+                color: colors.textMain,
+              }}
+            >
+              GROWFY
+            </div>
           </div>
         </div>
 
@@ -80,7 +83,7 @@ export const LoginPage: React.FC = () => {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <Input
-            label="E‑mail"
+            label="E-mail"
             type="email"
             value={email}
             placeholder="name@company.com"
@@ -88,7 +91,7 @@ export const LoginPage: React.FC = () => {
             onBlur={() => setTouched((t) => ({ ...t, email: true }))}
             error={
               touched.email && !emailValid
-                ? "Проверьте корректность e‑mail."
+                ? "Проверьте корректность e-mail."
                 : undefined
             }
           />

@@ -2,6 +2,7 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
 import { colors, radius } from "../../theme";
+import iconLogo from "../../assets/icon_logo.svg";
 
 const navItems = [
   { to: "/courses", label: "Разработка курсов" },
@@ -25,7 +26,8 @@ export const Sidebar: React.FC<Props> = ({ onMentorClick }) => {
       }}
     >
       <div style={{ height: 80, display: "flex", alignItems: "center" }}>
-        <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <img src={iconLogo} alt="GROWFY" style={{ width: 26, height: 26 }} />
           <div
             style={{
               fontSize: 18,
@@ -35,17 +37,6 @@ export const Sidebar: React.FC<Props> = ({ onMentorClick }) => {
             }}
           >
             GROWFY
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 11,
-              letterSpacing: "0.16em",
-              textTransform: "uppercase",
-              color: colors.textSoft,
-            }}
-          >
-            LMS PLATFORM
           </div>
         </div>
       </div>
@@ -65,7 +56,9 @@ export const Sidebar: React.FC<Props> = ({ onMentorClick }) => {
               fontSize: 15,
               color: isActive ? colors.textMain : colors.textSoft,
               background: isActive ? "#D6DACF" : "transparent",
-              borderLeft: isActive ? `4px solid ${colors.primaryDark}` : "4px solid transparent",
+              borderLeft: isActive
+                ? `4px solid ${colors.primaryDark}`
+                : "4px solid transparent",
             })}
           >
             {item.label}
@@ -98,22 +91,12 @@ export const Sidebar: React.FC<Props> = ({ onMentorClick }) => {
               width: 44,
               height: 44,
               borderRadius: "50%",
-              background:
-                "linear-gradient(135deg, #C0C8B8, #909887)",
+              background: "linear-gradient(135deg, #C0C8B8, #909887)",
             }}
           />
           <div style={{ textAlign: "left" }}>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>
-              Иван Иванов
-            </div>
-            <div
-              style={{
-                fontSize: 13,
-                color: colors.textSoft,
-              }}
-            >
-              Ментор
-            </div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Иван Иванов</div>
+            <div style={{ fontSize: 13, color: colors.textSoft }}>Ментор</div>
           </div>
         </div>
       </button>
