@@ -1,4 +1,11 @@
 // src/components/course/LessonDemoPage.tsx
+// ✅ Реализация по обновлённой доке + фиксы:
+// 1) порядок запросов: create-case -> upload -> generate-video -> poll (is_ready && video_status==="completed") -> показать видео
+// 2) защита от двойного запуска useEffect (React 18 StrictMode dev)
+// 3) если generate-video отвечает "video already in progress" — НЕ ошибка, продолжаем poll
+// 4) если poll временно падает 502/503/504 — НЕ падаем, продолжаем ретраить + делаем финальную проверку через stream-video
+// 5) loader внутри плеера, логи под ним, подпись у суфлёра снизу убрана
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "../../ui/Button";
@@ -8,9 +15,12 @@ import {
   createCaseDraft,
   uploadFileChunked,
   generateVideo,
-  pollCase,
   streamVideoUrl,
   getApiBaseCandidates,
+  // ✅ новые функции из growfyApi.ts (добавь их туда, как я писал)
+  pollCaseSafe,
+  checkStreamAvailable,
+  type PollResult,
 } from "../../api/growfyApi";
 
 type LocationState = {
@@ -33,6 +43,17 @@ function first3SlidesText(raw: string): string {
   return parseSlides(raw).slice(0, 3).join("\n\n").trim();
 }
 
+function extractCloudflareRayId(html: string): string | null {
+  if (!html) return null;
+  const m = html.match(/Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)<\/strong>/i);
+  return m?.[1]?.trim() ?? null;
+}
+
+function isAlreadyInProgressError(err: any): boolean {
+  const msg = (err?.message || String(err || "")).toLowerCase();
+  return msg.includes("already in progress") || msg.includes("video already in progress");
+}
+
 export const LessonDemoPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -41,14 +62,19 @@ export const LessonDemoPage: React.FC = () => {
   const scriptText = state.scriptText ?? "";
   const deckFile = state.deckFile;
   const avatarId = state.avatarId ?? "";
-  const voiceId = state.voiceId ?? "";
+  const VOICE_ID = "768a611f-14e8-406b-8c91-49c66653310d";
+const voiceId = VOICE_ID;
   const formatId = state.formatId ?? "";
 
   const slides = useMemo(() => parseSlides(scriptText), [scriptText]);
   const teleprompterText = useMemo(() => slides.slice(0, 3).join("\n\n"), [slides]);
 
-  const startedRef = useRef(false); // ✅ StrictMode guard
-  const [apiBase, setApiBase] = useState<string>(""); // ✅ base, по которому реально отработало
+  const [runKey, setRunKey] = useState(0);
+
+
+
+
+  const [apiBase, setApiBase] = useState<string>("");
   const [debugLog, setDebugLog] = useState<string[]>([]);
 
   const [status, setStatus] = useState<string>("");
@@ -56,12 +82,13 @@ export const LessonDemoPage: React.FC = () => {
   const [caseId, setCaseId] = useState<string>("");
   const [isBusy, setIsBusy] = useState<boolean>(true);
   const [isReady, setIsReady] = useState<boolean>(false);
+  const [videoStatus, setVideoStatus] = useState<string>("");
 
   const log = (msg: string, extra?: any) => {
     const line = extra ? `${msg} ${JSON.stringify(extra)}` : msg;
     // eslint-disable-next-line no-console
     console.log("[GROWFY]", line);
-    setDebugLog((p) => [...p.slice(-60), line]);
+    setDebugLog((p) => [...p.slice(-200), line]);
   };
 
   const videoSrc = useMemo(() => {
@@ -70,8 +97,7 @@ export const LessonDemoPage: React.FC = () => {
   }, [apiBase, caseId, isReady]);
 
   useEffect(() => {
-    if (startedRef.current) return; // ✅ не запускаем дважды
-    startedRef.current = true;
+  
 
     let cancelled = false;
 
@@ -80,60 +106,53 @@ export const LessonDemoPage: React.FC = () => {
       setStatus("Старт...");
       setIsBusy(true);
       setIsReady(false);
+      setVideoStatus("");
       setDebugLog([]);
       setApiBase("");
+      setCaseId("");
+
+      const baseCandidate = getApiBaseCandidates()[0] || "/api/public";
+      setApiBase(baseCandidate);
 
       log("API_BASE candidates", { list: getApiBaseCandidates() });
+      log("apiBase selected", { base: baseCandidate });
 
-      // базовая валидация
+      // guards
       if (!scriptText) {
         setError("Нет текста суфлёра. Вернитесь назад и загрузите .docx");
         setIsBusy(false);
+        setStatus("");
         return;
       }
       if (!deckFile) {
         setError("Нет файла презентации. Вернитесь назад и загрузите презентацию.");
         setIsBusy(false);
+        setStatus("");
         return;
       }
       if (!avatarId || !voiceId || !formatId) {
         setError("Не выбраны аватар/голос/формат. Вернитесь назад и заполните параметры.");
         setIsBusy(false);
+        setStatus("");
         return;
       }
 
       try {
+        // 1) Create case
         setStatus("Создаём кейс...");
         log("create-case: start");
-
-        // createCaseDraft внутри попробует все base-кандидаты
         const id = await createCaseDraft({ log });
         if (cancelled) return;
 
         setCaseId(id);
         log("create-case: ok", { caseId: id });
 
-        // Определяем base для stream: делаем быстрый poll (он тоже логирует url)
-        setStatus("Определяем рабочий API base...");
-        await pollCase(id, { log });
-
-        // Вытягиваем base из последней строки, где есть url
-        // пример: HTTP: done {"url":"https://.../poll/<id>", ...}
-        const lastWithUrl = [...debugLog].reverse().find((l) => l.includes(`"url":"`) && l.includes("/poll/"));
-        if (lastWithUrl) {
-          const m = lastWithUrl.match(/"url":"([^"]+)"/);
-          const url = m?.[1] || "";
-          const base = url.replace(/\/poll\/.*$/, "");
-          if (base) {
-            setApiBase(base);
-            log("apiBase selected", { base });
-          }
-        }
-
+        // 2) Upload deck (chunked)
         setStatus("Загружаем презентацию...");
         log("upload: start", { name: deckFile.name, size: deckFile.size });
 
         await uploadFileChunked(id, deckFile, {
+          chunkSizeBytes: 1 * 1024 * 1024, // 1MB (меньше риск 504)
           onProgress: ({ percent, sentChunks, totalChunks }) => {
             if (cancelled) return;
             setStatus(`Загрузка презентации: ${percent}% (${sentChunks}/${totalChunks})`);
@@ -144,77 +163,144 @@ export const LessonDemoPage: React.FC = () => {
         if (cancelled) return;
         log("upload: ok");
 
+        // 3) Generate video (берём первые 3 слайда)
         const script3 = first3SlidesText(scriptText);
 
         setStatus("Запускаем генерацию...");
-        log("generate-video: start", { scriptLen: script3.length, avatarId, voiceId });
+        log("generate-video: start", { scriptLen: script3.length, avatarId, voiceId, formatId });
 
-        await generateVideo(
-          id,
-          {
-            video_request: {
-              input: [
-                {
-                  scriptText: script3,
-                  avatar: avatarId,
-                  avatarSettings: {
-                    horizontalAlign: "center",
-                    scale: 1,
-                    style: "rectangular",
-                    voice: voiceId,
-                    seamless: false,
-                  },
-                  background: "white_cafe",
-                  backgroundSettings: {
-                    videoSettings: {
-                      shortBackgroundContentMatchMode: "freeze",
-                      longBackgroundContentMatchMode: "trim",
+        try {
+          await generateVideo(
+            id,
+            {
+              video_request: {
+                input: [
+                  {
+                    scriptText: script3,
+                    avatar: avatarId,
+                    avatarSettings: {
+                      horizontalAlign: "center",
+                      scale: 1,
+                      style: "rectangular",
+                      voice: voiceId,
+                      seamless: false,
+                    },
+                    background: "white_cafe",
+                    backgroundSettings: {
+                      videoSettings: {
+                        shortBackgroundContentMatchMode: "freeze",
+                        longBackgroundContentMatchMode: "trim",
+                      },
                     },
                   },
-                },
-              ],
-              test: true,
-              title: "Demo video",
-              visibility: "private",
-              aspectRatio: "4:5",
-              description: "Demo generate from UI",
-              soundtrack: "corporate",
+                ],
+                test: true,
+                title: "Demo video",
+                visibility: "private",
+                aspectRatio: "4:5",
+                description: "Demo generate from UI",
+                soundtrack: "corporate",
+              },
             },
-          },
-          false,
-          { log }
-        );
+            false,
+            { log }
+          );
 
-        if (cancelled) return;
-        log("generate-video: ok");
+          if (cancelled) return;
+          log("generate-video: ok");
+        } catch (genErr: any) {
+          // ✅ НЕ ошибка: уже запущено
+          if (isAlreadyInProgressError(genErr)) {
+            log("generate-video: already in progress (continue polling)");
+          } else {
+            throw genErr;
+          }
+        }
 
+        // 4) Poll until is_ready && video_status === "completed"
         setStatus("Ожидаем готовность...");
-        const maxAttempts = 180;
+        const maxAttempts = 300; // ~10 минут при 2s интервале
 
         for (let i = 0; i < maxAttempts; i++) {
-          const ready = await pollCase(id, { log });
           if (cancelled) return;
 
-          if (ready) {
-            setIsReady(true);
-            setIsBusy(false);
-            setStatus("Видео готово!");
-            log("poll: ready");
-            return;
+          const p: PollResult = await pollCaseSafe(id, { log });
+          if (cancelled) return;
+
+          if (p.ok) {
+            const vs = (p.data.video_status || "").toLowerCase();
+            setVideoStatus(p.data.video_status || "");
+
+            const done = p.data.is_ready && vs === "completed";
+            if (done) {
+              setIsReady(true);
+              setIsBusy(false);
+              setStatus("Видео готово!");
+              log("poll: ready", { video_status: p.data.video_status });
+              return;
+            }
+
+            setStatus(
+              `Ожидание... (${i + 1}/${maxAttempts})` +
+                (p.data.video_status ? ` · статус: ${p.data.video_status}` : "")
+            );
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
           }
 
-          setStatus(`Ожидание... (${i + 1}/${maxAttempts})`);
-          await new Promise((r) => setTimeout(r, 2000));
+          // ✅ временная ошибка 502/503/504 — не падаем
+          if (p.temporary) {
+            const hint =
+              p.status === 502
+                ? "502 Bad Gateway"
+                : p.status === 503
+                  ? "503 Service Unavailable"
+                  : p.status === 504
+                    ? "504 Gateway Timeout"
+                    : "временная ошибка сети/сервера";
+
+            const rayHint = p.rayId ? ` · RayID: ${p.rayId}` : "";
+            setStatus(
+              `Сервер временно недоступен: ${hint}. Пробуем ещё... (${i + 1}/${maxAttempts})${rayHint}`
+            );
+
+            // ✅ финальная проверка: если stream уже отдаётся — считаем готовым
+            const streamOk = await checkStreamAvailable(baseCandidate, id, { log });
+            if (streamOk) {
+              setIsReady(true);
+              setIsBusy(false);
+              setStatus("Видео готово! (проверено по stream-video)");
+              log("ready by stream-check", { rayId: p.rayId || null });
+              return;
+            }
+
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+
+          // не временная ошибка — фейлим
+          throw new Error(p.message);
         }
 
         throw new Error("Таймаут ожидания готовности видео");
       } catch (e: any) {
         if (cancelled) return;
 
-        setError(e?.message || "Ошибка");
+        const msg = e?.message || String(e);
+        const ray = extractCloudflareRayId(msg);
+        const hint = ray ? `\nCloudflare Ray ID: ${ray}` : "";
+
+        setError(
+          msg.includes("502")
+            ? `API сейчас недоступен (502 Bad Gateway). Это ошибка на стороне growfy.tech.${hint}`
+            : msg.includes("504")
+              ? `API не успел ответить (504 Gateway Timeout). Перегруз/таймаут на стороне сервера.${hint}`
+              : msg
+        );
+
         setIsBusy(false);
         setStatus("");
-        log("ERROR", { message: e?.message || String(e) });
+        log("ERROR", { message: msg, rayId: ray });
       }
     };
 
@@ -224,7 +310,9 @@ export const LessonDemoPage: React.FC = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [runKey]);
+
+  const showLoader = !videoSrc; // loader пока видео не доступно
 
   return (
     <div style={{ maxWidth: 1180, margin: "0 auto" }}>
@@ -250,11 +338,9 @@ export const LessonDemoPage: React.FC = () => {
           >
             COMPANY NAME
           </div>
-          <div style={{ fontSize: 34, fontWeight: 600, marginBottom: 8 }}>
-            Демо видео
-          </div>
+          <div style={{ fontSize: 34, fontWeight: 600, marginBottom: 8 }}>Демо видео</div>
           <div style={{ fontSize: 14, color: colors.textSoft }}>
-            Генерация запускается автоматически. Логи — DevTools → Console / Network.
+            Генерация запускается автоматически. Ошибки и логи — под плеером.
           </div>
         </div>
 
@@ -262,6 +348,16 @@ export const LessonDemoPage: React.FC = () => {
           <Button onClick={() => navigate(-1)} style={{ borderRadius: 999, height: 44 }}>
             ← Назад
           </Button>
+
+          <Button
+            onClick={() => setRunKey((k) => k + 1)}
+            style={{ borderRadius: 999, height: 44 }}
+            disabled={isBusy}
+            title={isBusy ? "Идёт процесс..." : "Повторить запросы"}
+          >
+            Повторить
+          </Button>
+
           <Button
             onClick={() => navigate("/lesson/final")}
             style={{ borderRadius: 999, height: 44 }}
@@ -283,11 +379,8 @@ export const LessonDemoPage: React.FC = () => {
       >
         {/* Player */}
         <Card style={{ padding: 18 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
-            Превью видео
-          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Превью видео</div>
 
-          {/* Плеер / загрузка внутри */}
           <div
             style={{
               position: "relative",
@@ -303,55 +396,108 @@ export const LessonDemoPage: React.FC = () => {
               <video
                 controls
                 preload="metadata"
-                style={{ width: "100%", height: "100%", display: "block", background: "black" }}
-                src={videoSrc}
-                onError={() =>
-                  setError("Не удалось загрузить видео-поток. Проверьте stream-video и готовность кейса.")
-                }
-              />
-            ) : (
-              <div
                 style={{
                   width: "100%",
                   height: "100%",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 10,
-                  color: colors.textSoft,
-                  padding: 16,
-                  textAlign: "center",
+                  display: "block",
+                  background: "black",
                 }}
-              >
-                <div style={{ fontSize: 16, fontWeight: 700 }}>
-                  {isBusy ? "Генерация видео..." : "Видео не готово"}
-                </div>
-                <div style={{ fontSize: 13 }}>{status || "Ожидание..."}</div>
-                {caseId && (
-                  <div style={{ fontSize: 12 }}>
-                    caseId: <code>{caseId}</code>
+                src={videoSrc}
+                onError={() =>
+                  setError(
+                    "Не удалось загрузить видео-поток. Проверьте stream-video и готовность кейса."
+                  )
+                }
+              />
+            ) : (
+              <div style={{ width: "100%", height: "100%" }} />
+            )}
+
+            {/* loader overlay */}
+            {showLoader && (
+              <>
+                <style>{`
+                  @keyframes growfySpin { to { transform: rotate(360deg); } }
+                  @keyframes growfyPulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+                `}</style>
+
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 18,
+                    background:
+                      "linear-gradient(180deg, rgba(247,248,245,0.55), rgba(247,248,245,0.85))",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 10,
+                      textAlign: "center",
+                      padding: 18,
+                      borderRadius: 18,
+                      border: "1px solid rgba(0,0,0,0.08)",
+                      background: "rgba(255,255,255,0.7)",
+                      backdropFilter: "blur(6px)",
+                      minWidth: 260,
+                      maxWidth: 460,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 999,
+                        border: "4px solid rgba(90,102,80,0.25)",
+                        borderTopColor: colors.primaryDark,
+                        animation: "growfySpin 1s linear infinite",
+                      }}
+                    />
+                    <div style={{ fontSize: 15, fontWeight: 800, color: colors.textMain }}>
+                      {isBusy ? "Генерация видео..." : "Видео не готово"}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: colors.textSoft,
+                        animation: "growfyPulse 1.4s ease-in-out infinite",
+                        whiteSpace: "pre-wrap",
+                      }}
+                    >
+                      {status || "Ожидание..."}
+                    </div>
+
+                    {videoStatus && (
+                      <div style={{ fontSize: 12, color: colors.textSoft }}>
+                        video_status: <code>{videoStatus}</code>
+                      </div>
+                    )}
+
+                    {caseId && (
+                      <div style={{ fontSize: 12, color: colors.textSoft }}>
+                        caseId: <code>{caseId}</code>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </div>
+              </>
             )}
           </div>
 
           {/* Ошибки под плеером */}
           {error && (
-            <div style={{ marginTop: 10, fontSize: 13, color: "#8B2E2E" }}>
+            <div style={{ marginTop: 10, fontSize: 13, color: "#8B2E2E", whiteSpace: "pre-wrap" }}>
               {error}
             </div>
           )}
 
-          {/* Статусы под плеером */}
-          {!error && status && (
-            <div style={{ marginTop: 10, fontSize: 13, color: colors.textSoft }}>
-              {status}
-            </div>
-          )}
-
-          {/* Отладка (чтобы ты копировал) */}
+          {/* Debug log */}
           <div style={{ marginTop: 10, fontSize: 12, color: colors.textSoft }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Debug log (копируй и присылай):</div>
             <div
@@ -360,7 +506,7 @@ export const LessonDemoPage: React.FC = () => {
                 borderRadius: 12,
                 padding: 10,
                 background: "rgba(255,255,255,0.55)",
-                maxHeight: 160,
+                maxHeight: 220,
                 overflow: "auto",
                 whiteSpace: "pre-wrap",
                 lineHeight: 1.35,
@@ -370,7 +516,7 @@ export const LessonDemoPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Техническая инфа */}
+          {/* техинфа */}
           <div style={{ marginTop: 10, fontSize: 12, color: colors.textSoft }}>
             {apiBase ? (
               <>
@@ -384,8 +530,7 @@ export const LessonDemoPage: React.FC = () => {
               </>
             ) : (
               <>
-                API base пока не определён · кандидаты:{" "}
-                <code>{getApiBaseCandidates().join(" | ")}</code>
+                API base пока не определён · кандидаты: <code>{getApiBaseCandidates().join(" | ")}</code>
               </>
             )}
           </div>
@@ -393,9 +538,7 @@ export const LessonDemoPage: React.FC = () => {
 
         {/* Teleprompter */}
         <Card style={{ padding: 18 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
-            Суфлёр
-          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Суфлёр</div>
 
           <div
             style={{
@@ -415,12 +558,7 @@ export const LessonDemoPage: React.FC = () => {
             {scriptText ? teleprompterText || "Слайды не найдены" : "Нет текста суфлёра"}
           </div>
 
-          {!!scriptText && (
-            <div style={{ marginTop: 10, fontSize: 12, color: colors.textSoft }}>
-              Показаны первые {Math.min(3, slides.length)} слайда без маркера{" "}
-              <code>[next-slide]</code>.
-            </div>
-          )}
+          {/* подпись снизу убрана */}
         </Card>
       </div>
     </div>
